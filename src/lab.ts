@@ -10,8 +10,8 @@ export const examples = [
 ]
 
 export type Settings = { prompt: string; model: string; temperature: number }
-export type Candidate = { token: string; logprob: number; bytes?: number[] }
-export type Prediction = Candidate & { top_logprobs?: Candidate[]; prefix: string | null }
+export type Candidate = { token: string; logprob?: number | null; bytes?: number[] }
+export type Prediction = Candidate & { top_logprobs?: unknown }
 export type ResponsePart = { text: string; predictionIndex?: number }
 export type Metrics = {
   prompt_eval_count?: number
@@ -20,7 +20,7 @@ export type Metrics = {
 }
 type Chunk = Metrics & {
   message?: { content?: string; thinking?: string }
-  logprobs?: Omit<Prediction, 'prefix'>[]
+  logprobs?: unknown
   done?: boolean
   error?: string
 }
@@ -40,12 +40,79 @@ export function pieces(text: string) {
   return text.match(/[^\S\r\n]*[\p{L}\p{M}]+|[^\S\r\n]*\p{N}{1,3}|[^\S\r\n]*[^\s\p{L}\p{M}\p{N}]|\s+/gu) ?? []
 }
 
-export function visibleToken(token: string) {
-  return token.replace(/ /g, '␣').replace(/\r/g, '␍').replace(/\n/g, '↵').replace(/\t/g, '⇥') || '∅'
+export function visibleToken(token: string, space = '␣') {
+  return token.replace(/ /g, space).replace(/\r/g, '␍').replace(/\n/g, '↵').replace(/\t/g, '⇥') || '∅'
+}
+
+export function predictionTokenLabel(token: string) {
+  const label = visibleToken(token, '␠')
+  const unicodeLabel = (character: string) => `[U+${character.codePointAt(0)!.toString(16).padStart(4, '0').toUpperCase()}]`
+  return tokenKind(token) === 'Non-printing token'
+    ? label.replace(/[\p{C}\p{Zl}\p{Zp}]/gu, unicodeLabel)
+    : label.replace(/\p{Cc}/gu, unicodeLabel)
+}
+
+export function tokenKind(token: string) {
+  if (!token) return 'Empty token'
+  if (/^[ \r\n\t]+$/.test(token)) return 'Whitespace token'
+  if (/^[\p{C}\p{Z}\s]+$/u.test(token)) return 'Non-printing token'
+  if (/^(?:<\|[^<>|\s]+\|>|<\/?s>|<unk>|<pad>)$/.test(token)) return 'Special-token notation'
+}
+
+function hasTokenText(value: unknown): value is Candidate {
+  return typeof value === 'object' && value !== null && 'token' in value && typeof value.token === 'string'
+}
+
+export function predictionFrame(chunk: Chunk, firstPrediction: number) {
+  const content = chunk.message?.content ?? ''
+  const records = Array.isArray(chunk.logprobs) ? chunk.logprobs : []
+  const predictions: Prediction[] = chunk.message?.thinking ? [] : records.filter(hasTokenText)
+  const matches = predictions.length > 0 && predictions.length === records.length &&
+    predictions.map(({ token }) => token).join('') === content
+  // Preserve response text verbatim. Only matched records provide boundaries the UI can inspect.
+  const parts: ResponsePart[] = matches
+    ? predictions.map(({ token }, index) => ({ text: token, predictionIndex: firstPrediction + index }))
+    : content || (!chunk.message?.thinking && records.length > 0) ? [{ text: content }] : []
+  return { parts, predictions }
+}
+
+export function predictionContext(parts: ResponsePart[], position: number) {
+  const selected = parts.findIndex(({ predictionIndex }) => predictionIndex === position)
+  if (selected < 0) return { prefix: null, suffix: null }
+
+  function alignedText(section: ResponsePart[]) {
+    return section.every(({ predictionIndex }) => predictionIndex !== undefined)
+      ? section.map(({ text }) => text).join('')
+      : null
+  }
+
+  return { prefix: alignedText(parts.slice(0, selected)), suffix: alignedText(parts.slice(selected + 1)) }
+}
+
+export function candidateProbabilities(prediction: Prediction) {
+  const candidates = (Array.isArray(prediction.top_logprobs) ? prediction.top_logprobs : [])
+    .filter((value): value is Candidate & { logprob: number } =>
+      hasTokenText(value) && isLogProbability(value.logprob))
+    .slice(0, 10)
+  if (!candidates.length) return []
+
+  // Subtracting the largest log probability keeps the normalization stable for very small values.
+  const largest = Math.max(...candidates.map(({ logprob }) => logprob))
+  const weights = candidates.map(({ logprob }) => Math.exp(logprob - largest))
+  const total = weights.reduce((sum, weight) => sum + weight, 0)
+  return candidates.map((candidate, index) => ({
+    ...candidate,
+    relative: 100 * weights[index] / total,
+    probability: Math.exp(candidate.logprob),
+  }))
+}
+
+export function isLogProbability(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value <= 0
 }
 
 export function sameToken(a: Candidate, b: Candidate) {
-  return a.bytes && b.bytes ? a.bytes.join(',') === b.bytes.join(',') : a.token === b.token
+  return Array.isArray(a.bytes) && Array.isArray(b.bytes) ? a.bytes.join(',') === b.bytes.join(',') : a.token === b.token
 }
 
 export function readWorkshopMode() {
@@ -109,27 +176,12 @@ export function useGeneration(onConnectionError: () => Promise<void>) {
       previous: last?.parts.length ? last : previous,
     }))
     let complete = false
-    let output = ''
 
     function consume(line: string) {
       if (!line.trim()) return
       const chunk: Chunk = JSON.parse(line)
       if (chunk.error) throw new Error(chunk.error)
-      const content = chunk.message?.content ?? ''
-      // Keep Ollama's response text authoritative if token strings cannot reconstruct the chunk.
-      const tokens = chunk.message?.thinking ? [] : (chunk.logprobs ?? [])
-      const matches = tokens.length > 0 && tokens.map(({ token }) => token).join('') === content
-      let prefix = output
-      const predictions = tokens.map((token, index) => {
-        const prediction = { ...token, prefix: matches || index === 0 ? prefix : null }
-        prefix += token.token
-        return prediction
-      })
-      output += content
-      const firstPrediction = current.predictions.length
-      const parts: ResponsePart[] = matches
-        ? tokens.map(({ token }, index) => ({ text: token, predictionIndex: firstPrediction + index })).filter(({ text }) => text)
-        : content ? [{ text: content }] : []
+      const { parts, predictions } = predictionFrame(chunk, current.predictions.length)
       complete ||= Boolean(chunk.done)
       current = {
         ...current,

@@ -36,3 +36,7 @@ Token IDs become vectors before the transformer processes them. The model uses a
 - **Settings** — Change the temperature and run the same prompt again. **Compare runs** in Generate shows the current and previous responses side by side. **Workshop mode** enlarges text and shortens explanations.
 
 The app keeps runs in memory and saves the Workshop mode preference in the browser. For the response fields, see the [Ollama chat API schema](https://github.com/ollama/ollama/blob/main/docs/openapi.yaml).
+
+## Prediction inspector checks
+
+Run `npm test` for the token-alignment and probability checks. Install Chromium with `npx playwright install chromium`, then run `npm run test:browser` to verify the Predict controls and clipboard against local test fixtures. The fixture tests run without Ollama.

@@ -4,7 +4,9 @@
   "scripts": {
     "dev": "concurrently -k -n api,web \"node --env-file-if-exists=.env --watch server/index.mjs\" \"vite\"",
     "build": "tsc --noEmit && vite build",
-    "start": "node --env-file-if-exists=.env server/index.mjs"
+    "start": "node --env-file-if-exists=.env server/index.mjs",
+    "test": "node --experimental-strip-types --test test/prediction.test.mjs",
+    "test:browser": "node --test test/predict.browser.mjs"
   },
   "type": "module",
   "dependencies": {
@@ -23,6 +25,7 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.3.0",
     "concurrently": "^10.0.7",
+    "playwright": "^1.65.1",
     "tailwindcss": "^4.3.5",
     "typescript": "^7.0.2",
     "vite": "^8.3.8"
